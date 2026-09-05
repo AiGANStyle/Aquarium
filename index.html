@@ -37,6 +37,32 @@
         transition: opacity 0.1s ease;
     }
 
+    #music-toggle-btn {
+        position: absolute;
+        top: 20px;
+        right: 20px;
+        z-index: 1000;
+        font-size: 24px;
+        background: rgba(0, 0, 0, 0.4);
+        color: white;
+        border: 2px solid rgba(255, 255, 255, 0.5);
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.2s, background 0.2s;
+    }
+    #music-toggle-btn:hover {
+        transform: scale(1.1);
+        background: rgba(0, 0, 0, 0.7);
+    }
+    #music-toggle-btn:active {
+        transform: scale(0.9);
+    }
+
     @keyframes sway {
         0% { transform: scale(1.0) translate(0, 0); }
         100% { transform: scale(1.05) translate(-10px, 10px); }
@@ -45,7 +71,7 @@
     /* UIコントロールパネル */
     #ui-panel {
         position: absolute;
-        top: 20px;
+        top: 80px; /* ボタンの下に表示されるように調整 */
         right: 20px;
         width: 320px;
         background: rgba(0, 20, 40, 0.85);
@@ -108,12 +134,13 @@
 </head>
 <body>
 
-<div id="ui-panel">
+<button id="music-toggle-btn">🎵</button>
+<div id="ui-panel" class="hidden">
     <!-- Spotify 埋め込みプレイヤー -->
     <iframe data-testid="embed-iframe" style="border-radius:12px; margin-bottom: 5px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);" src="https://open.spotify.com/embed/artist/2TzW0dR8xutzcp5u9S2vcE?utm_source=generator&theme=0" width="100%" height="152" frameBorder="0" allowfullscreen="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
 
     <p style="font-size:11px; color:#00e5ff; margin:10px 0 0 0; text-align:center; font-weight: bold;">
-        👆 画面(水槽)をクリックでこのパネルを隠せます
+        🎵 ボタンでこのパネルをON/OFFできます
     </p>
 </div>
 
@@ -128,14 +155,15 @@
 <script>
     const canvas = document.getElementById('aquarium');
     const ctx = canvas.getContext('2d');
-    
-    // --- UIパネルの表示・非表示トグル（画面クリック） ---
+
+    // --- UIパネルの表示・非表示トグル ---
     const uiPanel = document.getElementById('ui-panel');
-    
-    canvas.addEventListener('click', () => {
+    const musicBtn = document.getElementById('music-toggle-btn');
+
+    musicBtn.addEventListener('click', () => {
         uiPanel.classList.toggle('hidden');
     });
-    
+
     // パネル自身のクリック時はCanvasへイベントを伝播させない（閉じないようにする）
     uiPanel.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -202,24 +230,50 @@
         });
     }
 
-    const defaultUrls = {
-        back: 'http://localhost:8000/aquarium/aquarium_back%20(3).png',
-        mid: 'http://localhost:8000//aquarium/aquarium_mid%20(2).png',
-        front: 'http://localhost:8000/aquarium/aquarium_front%20(3).png'
+    const layerImagesList = {
+        back: ['images/aquarium_back.png', 'images/aquarium_back (1).png', 'images/aquarium_back (2).png', 'images/aquarium_back (3).png'],
+        mid: ['images/aquarium_mid.png', 'images/aquarium_mid (1).png', 'images/aquarium_mid (2).png'],
+        front: ['images/aquarium_front.png', 'images/aquarium_front (1).png', 'images/aquarium_front (2).png', 'images/aquarium_front (3).png']
     };
+    
+    let currentLayerIndexes = { back: 3, mid: 2, front: 3 };
+
+    const layerEffects = {
+        back: { active: false, time: 0 },
+        mid: { active: false, time: 0 },
+        front: { active: false, time: 0 }
+    };
+
+    async function loadLayerImage(key, index) {
+        try {
+            const img = new Image();
+            img.crossOrigin = "Anonymous";
+            img.src = layerImagesList[key][index];
+            await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+            layerImages[key].img = await processChromaKeyAndCrop(img, key === 'back');
+        } catch (e) { console.error("Load failed:", key, e); }
+    }
+
+    async function changeLayerImage(key) {
+        currentLayerIndexes[key] = (currentLayerIndexes[key] + 1) % layerImagesList[key].length;
+        
+        // くにゅっとエフェクトを開始
+        layerEffects[key].active = true;
+        layerEffects[key].time = 0;
+
+        await loadLayerImage(key, currentLayerIndexes[key]);
+    }
 
     async function loadDefaultImages() {
         const loadingDiv = document.getElementById('loading');
         loadingDiv.style.display = 'block';
-        for (let key of ['back', 'mid', 'front']) {
-            try {
-                const img = new Image();
-                img.crossOrigin = "Anonymous"; 
-                img.src = defaultUrls[key];
-                await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
-                layerImages[key].img = await processChromaKeyAndCrop(img, key === 'back');
-            } catch (e) { console.error("Load failed:", key, e); }
-        }
+        
+        await Promise.all([
+            loadLayerImage('back', currentLayerIndexes.back),
+            loadLayerImage('mid', currentLayerIndexes.mid),
+            loadLayerImage('front', currentLayerIndexes.front)
+        ]);
+
         loadingDiv.style.transition = "opacity 0.5s";
         loadingDiv.style.opacity = 0;
         setTimeout(() => { loadingDiv.style.display = 'none'; }, 500);
@@ -236,6 +290,23 @@
         ctx.scale(dpr, dpr);
     }
     window.addEventListener('resize', resize);
+
+    canvas.addEventListener('click', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const clickY = e.clientY - rect.top;
+        const ratio = clickY / rect.height;
+
+        if (ratio < 0.33) {
+            changeLayerImage('back');
+        } else if (ratio < 0.66) {
+            changeLayerImage('mid');
+        } else {
+            changeLayerImage('front');
+        }
+        
+        // タップ位置に波紋エフェクトも追加する
+        ripples.push(new Ripple(e.clientX - rect.left, clickY, 80));
+    });
 
     function drawLayerImage(ctx, layerData, layerType) {
         if (!layerData || !layerData.img) return;
@@ -262,10 +333,30 @@
             renderWidth = Math.max(width, height * 1.2); 
             renderHeight = img.height * (renderWidth / img.width);
             x = (width - renderWidth) / 2;
-            if (layerType === 'mid') y = height - renderHeight * 0.9; 
-            else if (layerType === 'front') y = height - renderHeight * 0.45; 
+            if (layerType === 'mid') y = height - renderHeight * 0.9;
+            else if (layerType === 'front') y = height - renderHeight * 0.45;
         }
-        ctx.drawImage(img, x, y, renderWidth, renderHeight);
+
+        let effectScaleX = 1;
+        let effectScaleY = 1;
+
+        if (layerEffects[layerType].active) {
+            layerEffects[layerType].time += 0.1;
+            const t = layerEffects[layerType].time;
+            const damping = Math.max(0, 1 - t / 4);
+            if (damping <= 0) {
+                layerEffects[layerType].active = false;
+            } else {
+                // サイン波でぷにゅっとバウンス
+                effectScaleX = 1 + Math.sin(t * Math.PI) * 0.05 * damping;
+                effectScaleY = 1 - Math.sin(t * Math.PI) * 0.05 * damping;
+            }
+        }
+
+        ctx.translate(x + renderWidth / 2, y + renderHeight / 2);
+        ctx.scale(effectScaleX, effectScaleY);
+        ctx.drawImage(img, -renderWidth / 2, -renderHeight / 2, renderWidth, renderHeight);
+
         ctx.restore();
     }
 
