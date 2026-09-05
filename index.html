@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aquarium Simulator</title>
+<style>
+    body, html {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background-color: #000b18;
+        font-family: sans-serif;
+    }
+
+    #aquarium {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: pointer; /* クリックできることを明示 */
+    }
+
+    /* 水のゆらめきを表現する全体オーバーレイ */
+    .water-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        background: linear-gradient(180deg, rgba(255,255,255,0.08) 0%, transparent 40%);
+        mix-blend-mode: overlay;
+        z-index: 10;
+        animation: sway 12s ease-in-out infinite alternate;
+        transition: opacity 0.1s ease;
+    }
+
+    @keyframes sway {
+        0% { transform: scale(1.0) translate(0, 0); }
+        100% { transform: scale(1.05) translate(-10px, 10px); }
+    }
+
+    /* UIコントロールパネル */
+    #ui-panel {
+        position: absolute;
+        top: 20px;
+        right: 20px;
+        width: 320px;
+        background: rgba(0, 20, 40, 0.85);
+        border: 1px solid rgba(0, 229, 255, 0.4);
+        border-radius: 12px;
+        padding: 15px 20px;
+        color: white;
+        z-index: 1000;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+    }
+
+    /* パネル非表示用のクラス */
+    #ui-panel.hidden {
+        opacity: 0;
+        transform: translateY(-20px);
+        pointer-events: none;
+    }
+
+    #ui-panel h3 {
+        margin: 0 0 12px 0;
+        font-size: 14px;
+        color: #00e5ff;
+        letter-spacing: 0.1em;
+    }
+
+    /* ローディングインジケーター */
+    #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: white;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 25px 50px;
+        border-radius: 12px;
+        z-index: 2000;
+        text-align: center;
+        display: none;
+        box-shadow: 0 4px 25px rgba(0,0,0,0.8);
+        backdrop-filter: blur(8px);
+    }
+
+    .spinner {
+        border: 4px solid rgba(255, 255, 255, 0.1);
+        border-top: 4px solid #00e5ff;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 15px auto;
+    }
+    
+    @keyframes spin { 
+        0% { transform: rotate(0deg); } 
+        100% { transform: rotate(360deg); } 
+    }
+</style>
+</head>
+<body>
+
+<div id="ui-panel">
+    <!-- Spotify 埋め込みプレイヤー -->
+    <iframe data-testid="embed-iframe" style="border-radius:12px; margin-bottom: 5px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);" src="https://open.spotify.com/embed/artist/2TzW0dR8xutzcp5u9S2vcE?utm_source=generator&theme=0" width="100%" height="152" frameBorder="0" allowfullscreen="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+
+    <p style="font-size:11px; color:#00e5ff; margin:10px 0 0 0; text-align:center; font-weight: bold;">
+        👆 画面(水槽)をクリックでこのパネルを隠せます
+    </p>
+</div>
+
+<div id="loading">
+    <div class="spinner"></div>
+    <div id="loading-text">水槽を準備中...</div>
+</div>
+
+<canvas id="aquarium"></canvas>
+<div class="water-overlay"></div>
+
+<script>
+    const canvas = document.getElementById('aquarium');
+    const ctx = canvas.getContext('2d');
+    
+    // --- UIパネルの表示・非表示トグル（画面クリック） ---
+    const uiPanel = document.getElementById('ui-panel');
+    
+    canvas.addEventListener('click', () => {
+        uiPanel.classList.toggle('hidden');
+    });
+    
+    // パネル自身のクリック時はCanvasへイベントを伝播させない（閉じないようにする）
+    uiPanel.addEventListener('click', (e) => {
+        e.stopPropagation();
+    });
+
+    // --- レイヤー画像管理 ---
+    const layerImages = {
+        back: { img: null },
+        mid: { img: null },
+        front: { img: null }
+    };
+
+    function processChromaKeyAndCrop(image, isBackground) {
+        if (isBackground) return new Promise(resolve => resolve(image));
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = image.width;
+        tempCanvas.height = image.height;
+        const tCtx = tempCanvas.getContext('2d');
+        tCtx.drawImage(image, 0, 0);
+        
+        const imgData = tCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+        const data = imgData.data;
+        let minX = image.width, minY = image.height, maxX = 0, maxY = 0;
+        let hasContent = false;
+
+        for (let y = 0; y < image.height; y++) {
+            for (let x = 0; x < image.width; x++) {
+                let i = (y * image.width + x) * 4;
+                let r = data[i], g = data[i+1], b = data[i+2];
+                let maxOther = Math.max(r, b);
+                let diff = g - maxOther;
+
+                if (g > 60 && diff > 30) {
+                    if (diff > 60) data[i+3] = 0;
+                    else {
+                        data[i+3] = 255 - ((diff - 30) / 30) * 255;
+                        data[i+1] = maxOther; 
+                    }
+                }
+                if (data[i+3] > 5) {
+                    hasContent = true;
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+        tCtx.putImageData(imgData, 0, 0);
+        if (!hasContent) return new Promise(resolve => resolve(image));
+
+        const trimWidth = maxX - minX + 1;
+        const trimHeight = maxY - minY + 1;
+        const trimCanvas = document.createElement('canvas');
+        trimCanvas.width = trimWidth;
+        trimCanvas.height = trimHeight;
+        trimCanvas.getContext('2d').putImageData(tCtx.getImageData(minX, minY, trimWidth, trimHeight), 0, 0);
+
+        const newImg = new Image();
+        return new Promise(resolve => {
+            newImg.onload = () => resolve(newImg);
+            newImg.src = trimCanvas.toDataURL('image/png');
+        });
+    }
+
+    const defaultUrls = {
+        back: 'http://localhost:8000/aquarium/aquarium_back%20(3).png',
+        mid: 'http://localhost:8000//aquarium/aquarium_mid%20(2).png',
+        front: 'http://localhost:8000/aquarium/aquarium_front%20(3).png'
+    };
+
+    async function loadDefaultImages() {
+        const loadingDiv = document.getElementById('loading');
+        loadingDiv.style.display = 'block';
+        for (let key of ['back', 'mid', 'front']) {
+            try {
+                const img = new Image();
+                img.crossOrigin = "Anonymous"; 
+                img.src = defaultUrls[key];
+                await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+                layerImages[key].img = await processChromaKeyAndCrop(img, key === 'back');
+            } catch (e) { console.error("Load failed:", key, e); }
+        }
+        loadingDiv.style.transition = "opacity 0.5s";
+        loadingDiv.style.opacity = 0;
+        setTimeout(() => { loadingDiv.style.display = 'none'; }, 500);
+    }
+
+    // --- 描画と環境設定 ---
+    let width, height;
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+        ctx.scale(dpr, dpr);
+    }
+    window.addEventListener('resize', resize);
+
+    function drawLayerImage(ctx, layerData, layerType) {
+        if (!layerData || !layerData.img) return;
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
+        const img = layerData.img;
+        let renderWidth, renderHeight, x, y;
+
+        if (layerType === 'back') {
+            const canvasRatio = width / height;
+            const imgRatio = img.width / img.height;
+            if (imgRatio > canvasRatio) {
+                renderHeight = height;
+                renderWidth = img.width * (height / img.height);
+                x = (width - renderWidth) / 2;
+                y = 0;
+            } else {
+                renderWidth = width;
+                renderHeight = img.height * (width / img.width);
+                x = 0;
+                y = (height - renderHeight) / 2;
+            }
+        } else {
+            renderWidth = Math.max(width, height * 1.2); 
+            renderHeight = img.height * (renderWidth / img.width);
+            x = (width - renderWidth) / 2;
+            if (layerType === 'mid') y = height - renderHeight * 0.9; 
+            else if (layerType === 'front') y = height - renderHeight * 0.45; 
+        }
+        ctx.drawImage(img, x, y, renderWidth, renderHeight);
+        ctx.restore();
+    }
+
+    // --- 波紋・空間のゆがみクラス ---
+    class Ripple {
+        constructor(x, y, size) {
+            this.x = x;
+            this.y = y;
+            this.radius = size * 0.8;
+            this.life = 1.0;
+            this.decay = 0.02 + Math.random() * 0.015;
+            this.maxScale = 0.06;
+        }
+        update() {
+            this.radius += 1.2; 
+            this.life -= this.decay;
+        }
+        draw(ctx, sourceCanvas, w, h) {
+            if (this.life <= 0) return;
+            
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.clip(); 
+
+            // 波の屈折エフェクト
+            const scale = 1.0 + (this.life * this.maxScale); 
+            ctx.translate(this.x, this.y);
+            ctx.scale(scale, scale);
+            ctx.translate(-this.x, -this.y);
+            
+            ctx.drawImage(sourceCanvas, 0, 0, w, h);
+            ctx.restore();
+
+            // 水面の光沢
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(200, 255, 255, ${this.life * 0.15})`;
+            ctx.lineWidth = 2.0;
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    let fishes = [], bubbles = [], seaweeds = [], jellyfishes = [], turtles = [], lightRays = [], ripples = [];
+    const fishTypes = [
+        { color: '#FF7043', dark: '#BF360C' }, { color: '#26C6DA', dark: '#006064' }, 
+        { color: '#FFEE58', dark: '#F57F17' }, { color: '#EC407A', dark: '#880E4F' }, 
+        { color: '#FFFFFF', dark: '#9E9E9E' }  
+    ];
+
+    class Fish {
+        constructor() { this.reset(true); }
+        reset(initial = false) {
+            this.size = Math.random() * 12 + 15;
+            this.depthLayer = Math.floor(Math.random() * 3);
+            if (initial) {
+                this.x = Math.random() * width;
+                this.y = Math.random() * (height - 150) + 50;
+                this.vx = (Math.random() - 0.5) * 1.0; 
+            } else {
+                this.y = Math.random() * (height - 150) + 50;
+                this.vx = Math.random() > 0.5 ? Math.random() * 0.6 + 0.3 : -(Math.random() * 0.6 + 0.3);
+                this.x = this.vx > 0 ? -100 : width + 100;
+            }
+            if(Math.abs(this.vx) < 0.2) this.vx = this.vx > 0 ? 0.3 : -0.3; 
+            this.vy = (Math.random() - 0.5) * 0.2;
+            const type = fishTypes[Math.floor(Math.random() * fishTypes.length)];
+            this.color = type.color; this.darkColor = type.dark;
+            this.wobbleSpeed = Math.random() * 0.02 + 0.01;
+            this.wobblePhase = Math.random() * Math.PI * 2;
+            this.tailSpeed = Math.random() * 0.1 + 0.15;
+            this.scaleMulti = this.depthLayer === 0 ? 0.6 : (this.depthLayer === 1 ? 0.8 : 1.0);
+            this.rippleTimer = Math.random() * 20;
+        }
+        update(time) {
+            this.x += this.vx;
+            this.y += this.vy + Math.sin(time * this.wobbleSpeed + this.wobblePhase) * 0.3;
+            if (this.y < 80) this.vy += 0.01;
+            if (this.y > height - 100) this.vy -= 0.01;
+            if ((this.vx > 0 && this.x > width + 150) || (this.vx < 0 && this.x < -150)) this.reset();
+
+            if (this.depthLayer > 0) {
+                this.rippleTimer++;
+                if (this.rippleTimer > 20) {
+                    ripples.push(new Ripple(this.x - (this.vx * 3), this.y, this.size));
+                    this.rippleTimer = 0;
+                }
+            }
+        }
+        draw(ctx, time) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.scale(this.scaleMulti, this.scaleMulti); 
+            if (this.vx < 0) ctx.scale(-1, 1);
+            let angle = Math.atan2(this.vy, Math.abs(this.vx));
+            ctx.rotate(angle * 0.6);
+            let tailOffset = Math.sin(time * this.tailSpeed + this.wobblePhase) * this.size * 0.4;
+
+            ctx.fillStyle = `rgba(255, 255, 255, 0.3)`;
+            ctx.beginPath();
+            ctx.moveTo(0, -this.size * 0.6);
+            ctx.quadraticCurveTo(-this.size, -this.size * 1.4, -this.size * 1.2, -this.size * 0.2);
+            ctx.fill();
+            let finFlap = Math.sin(time * this.tailSpeed) * 0.3;
+            ctx.beginPath();
+            ctx.ellipse(0, this.size * 0.3, this.size * 0.4, this.size * 0.2, finFlap, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = this.depthLayer === 0 ? '#335566' : this.darkColor;
+            ctx.beginPath();
+            ctx.moveTo(-this.size, 0);
+            ctx.quadraticCurveTo(-this.size * 1.8, -this.size * 0.8 + tailOffset, -this.size * 2, -this.size * 0.6 + tailOffset);
+            ctx.lineTo(-this.size * 2, this.size * 0.6 + tailOffset);
+            ctx.quadraticCurveTo(-this.size * 1.8, this.size * 0.8 + tailOffset, -this.size, 0);
+            ctx.fill();
+
+            let displayColor = this.depthLayer === 0 ? '#558899' : this.color;
+            let bodyGrad = ctx.createLinearGradient(-this.size, -this.size, this.size, this.size);
+            bodyGrad.addColorStop(0, '#ffffff'); 
+            bodyGrad.addColorStop(0.3, displayColor);
+            bodyGrad.addColorStop(0.9, this.depthLayer === 0 ? '#224455' : this.darkColor);
+            
+            ctx.fillStyle = bodyGrad;
+            ctx.beginPath();
+            ctx.moveTo(this.size * 1.4, 0); 
+            ctx.quadraticCurveTo(this.size * 0.5, -this.size * 1.1, -this.size * 0.8, -this.size * 0.5); 
+            ctx.quadraticCurveTo(-this.size * 1.3, -this.size * 0.2, -this.size * 1.4, 0); 
+            ctx.quadraticCurveTo(-this.size * 1.3, this.size * 0.2, -this.size * 0.8, this.size * 0.5); 
+            ctx.quadraticCurveTo(this.size * 0.5, this.size * 0.9, this.size * 1.4, 0); 
+            ctx.fill();
+
+            ctx.fillStyle = '#FFEB3B'; 
+            ctx.beginPath();
+            ctx.arc(this.size * 0.8, -this.size * 0.15, this.size * 0.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#000'; 
+            ctx.beginPath();
+            ctx.arc(this.size * 0.82, -this.size * 0.15, this.size * 0.1, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#fff'; 
+            ctx.beginPath();
+            ctx.arc(this.size * 0.85, -this.size * 0.18, this.size * 0.04, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Jellyfish {
+        constructor() { this.reset(true); }
+        reset(initial=false) {
+            this.x = Math.random() * width;
+            this.y = initial ? Math.random() * height : height + 100;
+            this.size = Math.random() * 15 + 15;
+            this.baseVy = -(Math.random() * 0.15 + 0.05);
+            this.vy = this.baseVy;
+            this.phase = Math.random() * Math.PI * 2;
+            this.color = `hsla(${Math.random() * 60 + 180}, 90%, 75%, 0.4)`;
+            this.pulseSpeed = Math.random() * 0.005 + 0.003;
+            this.rippleTimer = 0;
+        }
+        update(time) {
+            let pulse = Math.sin(time * this.pulseSpeed + this.phase);
+            this.vy = this.baseVy + (pulse > 0.5 ? -0.2 : 0.05);
+            this.y += this.vy;
+            this.x += Math.sin(time * 0.001 + this.phase) * 0.2;
+            if (this.y < -100) this.reset();
+
+            this.rippleTimer++;
+            if (this.rippleTimer > 30) {
+                ripples.push(new Ripple(this.x, this.y + this.size, this.size * 1.2));
+                this.rippleTimer = 0;
+            }
+        }
+        draw(ctx, time) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            let pulse = Math.sin(time * this.pulseSpeed + this.phase);
+            let scaleX = 1 + pulse * 0.15;
+            let scaleY = 1 - pulse * 0.1;
+            ctx.scale(scaleX, scaleY);
+            
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = 1.5;
+            for(let i = -2; i <= 2; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * 4, 0);
+                let cx = i * 8 + Math.sin(time * 0.003 + i) * 8;
+                let cy = this.size * 1.5;
+                let endX = i * 10 + Math.sin(time * 0.003 + i * 2) * 15;
+                let endY = this.size * 3 + Math.sin(time * 0.005)*5;
+                ctx.quadraticCurveTo(cx, cy, endX, endY);
+                ctx.stroke();
+            }
+            
+            let grad = ctx.createRadialGradient(0, -this.size*0.3, 0, 0, 0, this.size);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
+            grad.addColorStop(1, this.color);
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.moveTo(-this.size, 0);
+            ctx.bezierCurveTo(-this.size, -this.size * 1.5, this.size, -this.size * 1.5, this.size, 0);
+            ctx.quadraticCurveTo(0, this.size * 0.3, -this.size, 0);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Turtle {
+        constructor() { this.reset(); }
+        reset() {
+            this.size = Math.random() * 20 + 35;
+            this.y = Math.random() * (height - 300) + 150;
+            this.vx = Math.random() > 0.5 ? Math.random() * 0.15 + 0.1 : -(Math.random() * 0.15 + 0.1);
+            this.x = this.vx > 0 ? -150 : width + 150;
+            this.phase = Math.random() * Math.PI * 2;
+            this.rippleTimer = 0;
+        }
+        update(time) {
+            this.x += this.vx;
+            this.y += Math.sin(time * 0.0005 + this.phase) * 0.15;
+            if ((this.vx > 0 && this.x > width + 200) || (this.vx < 0 && this.x < -200)) this.reset();
+
+            this.rippleTimer++;
+            if (this.rippleTimer > 25) {
+                ripples.push(new Ripple(this.x, this.y, this.size));
+                this.rippleTimer = 0;
+            }
+        }
+        draw(ctx, time) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            if (this.vx < 0) ctx.scale(-1, 1);
+            let flap = Math.sin(time * 0.001 + this.phase); 
+            let shellGrad = ctx.createRadialGradient(0, -this.size*0.2, 0, 0, 0, this.size);
+            shellGrad.addColorStop(0, '#5A6B41');
+            shellGrad.addColorStop(1, '#2A3618');
+
+            ctx.fillStyle = '#3A4A28';
+            ctx.beginPath();
+            ctx.ellipse(this.size * 0.4, -flap * this.size * 0.4, this.size * 0.6, this.size * 0.2, Math.PI/6 * flap, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = '#4A5B31';
+            ctx.beginPath();
+            ctx.ellipse(this.size * 0.9, 0, this.size * 0.35, this.size * 0.25, 0, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(this.size * 1.0, -this.size * 0.1, 3, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = shellGrad;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size * 0.6, 0, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = '#617544';
+            ctx.beginPath();
+            ctx.ellipse(this.size * 0.4, flap * this.size * 0.5, this.size * 0.7, this.size * 0.25, -Math.PI/5 * flap, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = '#4A5B31';
+            ctx.beginPath();
+            ctx.ellipse(-this.size * 0.8, 0, this.size * 0.3, this.size * 0.15, -Math.PI/6, 0, Math.PI*2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Bubble {
+        constructor() { this.reset(true); }
+        reset(initial = false) {
+            this.x = Math.random() * width;
+            this.y = initial ? Math.random() * height : height + 10;
+            this.size = Math.random() * 4 + 1.5;
+            this.speedY = Math.random() * 0.6 + 0.4;
+            this.wobbleSpeed = Math.random() * 0.02 + 0.01;
+            this.wobbleAmount = Math.random() * 2 + 1;
+            this.phase = Math.random() * Math.PI * 2;
+            this.baseX = this.x;
+        }
+        update(time) {
+            this.y -= this.speedY;
+            this.x = this.baseX + Math.sin(time * this.wobbleSpeed + this.phase) * this.wobbleAmount;
+            if (this.y < -20) this.reset();
+        }
+        draw(ctx) {
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(this.x - this.size * 0.3, this.y - this.size * 0.3, this.size * 0.25, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.fill();
+        }
+    }
+
+    class Seaweed {
+        constructor(x) {
+            this.baseX = x;
+            this.segments = Math.floor(Math.random() * 5) + 6;
+            this.segmentLength = Math.random() * 25 + 20;
+            this.color = `hsla(${Math.random() * 30 + 110}, 50%, 25%, 0.8)`; 
+            this.swaySpeed = Math.random() * 0.0015 + 0.0005; 
+            this.phaseOffset = Math.random() * Math.PI * 2;
+            this.thickness = Math.random() * 8 + 5;
+        }
+        draw(ctx, time) {
+            ctx.save();
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = this.thickness;
+
+            ctx.beginPath();
+            ctx.moveTo(this.baseX, height);
+            let currentX = this.baseX;
+            let currentY = height;
+
+            for (let i = 1; i <= this.segments; i++) {
+                let swayAmount = i * 5; 
+                let nextX = this.baseX + Math.sin(time * this.swaySpeed + i * 0.15 + this.phaseOffset) * swayAmount;
+                let nextY = height - (i * this.segmentLength);
+                let cpX = currentX;
+                let cpY = currentY - this.segmentLength / 2;
+                ctx.quadraticCurveTo(cpX, cpY, nextX, nextY);
+                currentX = nextX;
+                currentY = nextY;
+            }
+            ctx.stroke();
+            ctx.lineWidth = this.thickness * 0.3;
+            ctx.strokeStyle = `hsla(${Math.random() * 30 + 110}, 60%, 40%, 0.8)`;
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    class LightRay {
+        constructor() {
+            this.x = Math.random() * width;
+            this.width = Math.random() * 120 + 60;
+            this.angle = (Math.random() * 20 - 10) * Math.PI / 180;
+            this.opacity = Math.random() * 0.08 + 0.02;
+            this.phase = Math.random() * Math.PI * 2;
+            this.speed = Math.random() * 0.003 + 0.001;
+        }
+        draw(ctx, time) {
+            let currentOpacity = this.opacity + Math.sin(time * this.speed + this.phase) * 0.02;
+            if (currentOpacity < 0) currentOpacity = 0;
+
+            ctx.save();
+            ctx.globalCompositeOperation = 'screen';
+            let gradient = ctx.createLinearGradient(0, 0, 0, height * 0.9);
+            gradient.addColorStop(0, `rgba(200, 245, 255, ${currentOpacity})`);
+            gradient.addColorStop(1, 'rgba(200, 245, 255, 0)');
+            
+            ctx.fillStyle = gradient;
+            ctx.translate(this.x, 0);
+            ctx.rotate(this.angle);
+            ctx.beginPath();
+            ctx.moveTo(-this.width/2, 0);
+            ctx.lineTo(this.width/2, 0);
+            ctx.lineTo(this.width, height);
+            ctx.lineTo(-this.width, height);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    function initEnvironment() {
+        resize();
+        fishes = []; bubbles = []; seaweeds = []; jellyfishes = []; turtles = []; lightRays = []; ripples = [];
+        for (let i = 0; i < 25; i++) fishes.push(new Fish());
+        for (let i = 0; i < 60; i++) bubbles.push(new Bubble());
+        for (let i = 0; i < 6; i++) jellyfishes.push(new Jellyfish());
+        for (let i = 0; i < 2; i++) turtles.push(new Turtle());
+        for (let i = 0; i < width / 50; i++) {
+            let base_x = Math.random() * width;
+            for(let j=0; j < Math.random() * 2 + 1; j++) seaweeds.push(new Seaweed(base_x + (Math.random() * 15 - 7.5)));
+        }
+        for (let i = 0; i < 8; i++) lightRays.push(new LightRay());
+    }
+
+    const tempCanvas = document.createElement('canvas');
+    const tempCtx = tempCanvas.getContext('2d');
+    let startTime = null;
+
+    function animate(timestamp) {
+        if (!startTime) startTime = timestamp;
+        let time = timestamp - startTime;
+
+        ctx.clearRect(0, 0, width, height);
+
+        let bgGrad = ctx.createRadialGradient(width/2, 0, 0, width/2, 0, height);
+        bgGrad.addColorStop(0, '#0a4b7a');
+        bgGrad.addColorStop(0.5, '#031b3d');
+        bgGrad.addColorStop(1, '#000b18');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, width, height);
+
+        // --- 描画レイヤーの順序 ---
+        drawLayerImage(ctx, layerImages.back, 'back');
+        fishes.filter(f => f.depthLayer === 0).forEach(f => { f.update(time); f.draw(ctx, time); });
+        seaweeds.forEach(seaweed => seaweed.draw(ctx, time));
+        drawLayerImage(ctx, layerImages.mid, 'mid');
+
+        if (tempCanvas.width !== canvas.width || tempCanvas.height !== canvas.height) {
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+        }
+        tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
+        tempCtx.drawImage(canvas, 0, 0);
+
+        for (let i = ripples.length - 1; i >= 0; i--) {
+            ripples[i].update();
+            if (ripples[i].life <= 0) {
+                ripples.splice(i, 1);
+            } else {
+                ripples[i].draw(ctx, tempCanvas, width, height);
+            }
+        }
+
+        fishes.filter(f => f.depthLayer > 0).forEach(f => {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(f.x, f.y, f.size * 1.8, 0, Math.PI * 2);
+            ctx.clip(); 
+            const scale = 1.05; 
+            ctx.translate(f.x, f.y);
+            ctx.scale(scale, scale);
+            ctx.translate(-f.x, -f.y);
+            ctx.drawImage(tempCanvas, 0, 0, width, height);
+            ctx.restore();
+        });
+
+        fishes.filter(f => f.depthLayer === 1).forEach(f => { f.update(time); f.draw(ctx, time); });
+        jellyfishes.forEach(j => { j.update(time); j.draw(ctx, time); });
+        turtles.forEach(t => { t.update(time); t.draw(ctx, time); });
+        
+        drawLayerImage(ctx, layerImages.front, 'front');
+        fishes.filter(f => f.depthLayer === 2).forEach(f => { f.update(time); f.draw(ctx, time); });
+        bubbles.forEach(b => { b.update(time); b.draw(ctx); });
+        lightRays.forEach(ray => ray.draw(ctx, time));
+
+        requestAnimationFrame(animate);
+    }
+
+    initEnvironment();
+    loadDefaultImages(); 
+    requestAnimationFrame(animate);
+</script>
+</body>
+</html>
